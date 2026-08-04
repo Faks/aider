@@ -153,6 +153,7 @@ class GUI:
 
             # self.do_recommended_actions()
             self.do_add_to_chat()
+            self.do_mcp_tools()
             self.do_recent_msgs()
             self.do_clear_chat_history()
             # st.container(height=150, border=False)
@@ -162,6 +163,47 @@ class GUI:
                 "This browser version of aider is experimental. Please share feedback in [GitHub"
                 " issues](https://github.com/Aider-AI/aider/issues)."
             )
+
+    def do_mcp_tools(self):
+        """MCP tools panel in the sidebar."""
+        mgr = getattr(self.coder, "mcp_manager", None)
+        with st.expander("MCP Tools", expanded=False):
+            if not mgr:
+                st.write("No MCP servers configured.")
+                return
+            tools = mgr.list_tools()
+            if not tools:
+                st.write("No MCP tools available.")
+                return
+            tool_names = [t.name for t in tools]
+            tool = st.selectbox(
+                "Tool", tool_names, key=f"mcp_tool_{self.state.mcp_num}",
+                placeholder="Choose a tool", index=None,
+            )
+            if not tool:
+                return
+            tinfo = next((t for t in tools if t.name == tool), None)
+            params = getattr(tinfo, "inputSchema", {}) or {}
+            properties = params.get("properties", {}) or {}
+            args = {}
+            for pname, pinfo in properties.items():
+                ptype = (pinfo or {}).get("type", "string")
+                if ptype == "number":
+                    args[pname] = st.number_input(pname, key=f"mcp_{tool}_{pname}")
+                elif ptype == "boolean":
+                    args[pname] = st.checkbox(pname, key=f"mcp_{tool}_{pname}")
+                else:
+                    args[pname] = st.text_input(pname, key=f"mcp_{tool}_{pname}")
+            if st.button("Run", key=f"mcp_run_{tool}"):
+                with st.spinner(f"Running {tool}..."):
+                    result = mgr.dispatch(tool, args)
+                if result["is_error"]:
+                    st.error(result["text"])
+                else:
+                    st.text(result["text"])
+                    self.coder.cur_messages.append(
+                        dict(role="user", content=f"[MCP tool '{tool}' result]\n{result['text']}")
+                    )
 
     def do_settings_tab(self):
         pass
@@ -336,6 +378,7 @@ class GUI:
         self.state.init("last_undone_commit_hash")
         self.state.init("recent_msgs_num", 0)
         self.state.init("web_content_num", 0)
+        self.state.init("mcp_num", 0)
         self.state.init("prompt")
         self.state.init("scraper")
 

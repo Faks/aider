@@ -1015,6 +1015,37 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         analytics.event("exit", reason="ValueError during coder creation")
         return 1
 
+    # MCP setup: connect MCP servers configured via CLI, .aider.conf.yml,
+    # .mcp.json or AIDER_MCP_SERVER and expose their tools to the model.
+    from aider.mcp.manager import MCPManager
+
+    mcp_manager = MCPManager(
+        io=io,
+        output_limit=args.mcp_tool_output_limit,
+        max_roundtrips=args.mcp_max_roundtrips,
+        timeout=args.mcp_frame,
+    )
+    mcp_root = (
+        Path(args.mcp_root)
+        if args.mcp_root
+        else (Path(git_root) if git_root else Path.cwd())
+    )
+    mcp_manager.load_args(args.mcp_server, args.mcp_header, mcp_root)
+    if mcp_manager.servers:
+        mcp_manager.start()
+        coder.mcp_manager = mcp_manager
+        coder.mcp_max_roundtrips = args.mcp_max_roundtrips
+        if coder.functions is None:
+            coder.functions = []
+        for fn in mcp_manager.function_definitions():
+            if fn not in coder.functions:
+                coder.functions.append(fn)
+    import atexit
+
+    atexit.register(mcp_manager.shutdown)
+    for name, status in mcp_manager.server_status().items():
+        io.tool_output(f"MCP server {name}: {status}")
+
     if return_coder:
         analytics.event("exit", reason="Returning coder object")
         return coder

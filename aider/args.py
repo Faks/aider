@@ -862,6 +862,56 @@ def get_parser(default_config_files, git_root):
     )
 
     ##########
+    group = parser.add_argument_group("MCP settings")
+    group.add_argument(
+        "--mcp-server",
+        action="append",
+        metavar="NAME=URL",
+        help=(
+            "Connect to an MCP server at URL, e.g. --mcp-server metamcp=http://host/mcp"
+            " (can be used multiple times)"
+        ),
+    )
+    group.add_argument(
+        "--mcp-header",
+        action="append",
+        metavar="NAME=KEY:VALUE",
+        help=(
+            "Set an HTTP header for an MCP server, e.g. --mcp-header"
+            ' metamcp="Authorization: Bearer sk_..." (can be used multiple times)'
+        ),
+    )
+    group.add_argument(
+        "--mcp-root",
+        metavar="ROOT",
+        default=None,
+        help=(
+            "Root directory to search for .mcp.json project config (default: git root or cwd)"
+        ),
+    )
+    group.add_argument(
+        "--mcp-tool-output-limit",
+        metavar="CHARS",
+        default=16000,
+        help=(
+            "Maximum number of characters of MCP tool output to send back into the chat"
+            " (default: 16000)"
+        ),
+    )
+    group.add_argument(
+        "--mcp-max-roundtrips",
+        metavar="N",
+        default=5,
+        help="Maximum MCP tool call roundtrips per user message (default: 5)",
+    )
+    group.add_argument(
+        "--mcp-frame",
+        metavar="SECONDS",
+        default=60,
+        help="Seconds to wait for an MCP server response before timing out (default: 60)",
+    )
+
+    ##########
     group = parser.add_argument_group("Deprecated model settings")
     # Add deprecated model shortcut arguments
     add_deprecated_model_args(parser, group)

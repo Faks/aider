@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import re
 import subprocess
@@ -1678,6 +1679,269 @@ Just show me the edits I need to make.
             )
         except Exception as e:
             self.io.tool_error(f"An unexpected error occurred while copying to clipboard: {str(e)}")
+
+    def cmd_mcp(self, args):
+        """Manage and execute MCP tools.
+
+        Usage:
+          /mcp                    - Show MCP server status
+          /mcp list               - List all tools from connected servers
+          /mcp exec <tool> [json] - Execute a tool (args as JSON, or prompted)
+          /mcp add                - Add an MCP server interactively
+          /mcp remove <name>      - Disconnect an MCP server
+          /mcp save               - Persist session MCP servers to .mcp.json
+          /mcp reload             - Re-read config and .mcp.json
+          /mcp history            - Show recent MCP tool calls
+        """
+        parts = (args or "").strip().split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if not sub:
+            self._mcp_status()
+            return
+
+        if sub in ("list", "ls"):
+            self._mcp_list_tools()
+        elif sub == "exec":
+            self._mcp_exec(rest)
+        elif sub == "add":
+            self._mcp_add(rest)
+        elif sub in ("remove", "rm"):
+            self._mcp_remove(rest)
+        elif sub == "save":
+            self._mcp_save(rest)
+        elif sub == "reload":
+            self._mcp_reload()
+        elif sub == "history":
+            self._mcp_history()
+        else:
+            self.io.tool_error(f"Unknown /mcp subcommand: {sub}")
+            self.io.tool_output("Try: /mcp, /mcp list, /mcp exec <tool>, /mcp add, /mcp save")
+
+    def _mcp_manager(self):
+        mgr = getattr(self.coder, "mcp_manager", None)
+        if not mgr:
+            self.io.tool_error(
+                "No MCP servers configured. Add one with --mcp-server, in .aider.conf.yml,"
+                " in .mcp.json, or with /mcp add."
+            )
+        return mgr
+
+    def _mcp_status(self):
+        mgr = self._mcp_manager()
+        if not mgr:
+            return
+        self.io.tool_output(f"MCP servers ({len(mgr.servers)}):")
+        for name in mgr.servers:
+            self.io.tool_output(f"  {name}: {mgr.server_status().get(name, 'down')}")
+        tools = mgr.list_tools()
+        self.io.tool_output(f"Total tools available: {len(tools)}")
+        if tools:
+            self.io.tool_output("Run /mcp list to see them.")
+
+    def _mcp_list_tools(self):
+        mgr = self._mcp_manager()
+        if not mgr:
+            return
+        tools = mgr.list_tools()
+        if not tools:
+            self.io.tool_output("No MCP tools available.")
+            return
+        for tool in tools:
+            desc = (getattr(tool, "description", "") or "").strip().splitlines()
+            self.io.tool_output(f"  {tool.name}: {desc[0] if desc else 'no description'}")
+        self.io.tool_output(f"\n{len(tools)} tools. Use /mcp exec <tool> to run one.")
+
+    def _mcp_exec(self, arg):
+        mgr = self._mcp_manager()
+        if not mgr:
+            return
+
+        if not arg:
+            tools = mgr.list_tools()
+            self.io.tool_error("Usage: /mcp exec <tool> [json arguments]")
+            if tools:
+                self.io.tool_output("Available tools: " + ", ".join(t.name for t in tools))
+            return
+
+        name, _, json_arg = arg.partition(" ")
+        name = name.strip()
+        json_arg = json_arg.strip()
+
+        if not mgr.is_mcp_tool(name):
+            self.io.tool_error(f"Unknown MCP tool: {name}")
+            return
+
+        arguments = {}
+        if json_arg:
+            try:
+                arguments = json.loads(json_arg)
+            except json.JSONDecodeError as e:
+                self.io.tool_error(f"Invalid JSON arguments: {e}")
+                return
+        else:
+            tool = next((t for t in mgr.list_tools() if t.name == name), None)
+            if tool:
+                self.io.tool_output(f"Running {name} - enter arguments as JSON (or blank for none).")
+                raw = self.io.prompt_ask("args> ", default="{}")
+                if raw.strip():
+                    try:
+                        arguments = json.loads(raw)
+                    except json.JSONDecodeError as e:
+                        self.io.tool_error(f"Invalid JSON arguments: {e}")
+                        return
+
+        self.io.tool_output(f"Executing {name}...")
+        result = mgr.dispatch(name, arguments)
+        if result["is_error"]:
+            self.io.tool_error(result["text"])
+            return
+
+        self.io.tool_output(result["text"])
+        self.coder.cur_messages.append(
+            dict(role="user", content=f"[MCP tool '{name}' result]\n{result['text']}")
+        )
+
+    def _mcp_add(self, arg):
+        from aider.mcp.config import MCPServerConfig
+
+        if self.io.yes is not None:
+            self.io.tool_error("/mcp add requires an interactive terminal.")
+            return
+
+        name = arg.strip()
+        if not name:
+            name = self.io.prompt_ask("Server name> ", default="").strip()
+            if not name:
+                self.io.tool_error("No server name given.")
+                return
+
+        srv_type = self.io.prompt_ask("Type (http/stdio)> ", default="http").strip().lower()
+        cfg = MCPServerConfig(name=name)
+        if srv_type == "stdio":
+            command = self.io.prompt_ask("Command> ", default="").strip()
+            if not command:
+                self.io.tool_error("No command given.")
+                return
+            args_raw = self.io.prompt_ask("Args (space separated)> ", default="").strip()
+            cfg.command = command
+            cfg.args = args_raw.split() if args_raw else []
+            env_raw = self.io.prompt_ask("Env (KEY=value, comma sep)> ", default="").strip()
+            if env_raw:
+                cfg.env = {}
+                for chunk in env_raw.split(","):
+                    if "=" in chunk:
+                        k, _, v = chunk.partition("=")
+                        cfg.env[k.strip()] = v.strip()
+        else:
+            url = self.io.prompt_ask("URL> ", default="").strip()
+            if not url.startswith("http"):
+                self.io.tool_error("URL must start with http(s)://")
+                return
+            cfg.url = url
+            auth = self.io.prompt_ask("Auth header (Authorization: Bearer ...)> ", default="").strip()
+            if auth:
+                key, _, value = auth.partition(":")
+                cfg.headers[key.strip()] = value.strip()
+
+        self.io.tool_output("Testing connection...")
+        if mgr := getattr(self.coder, "mcp_manager", None):
+            ok = mgr.add_server(cfg)
+            if not ok:
+                self.io.tool_error(f"Failed to connect to {name}.")
+                return
+            self.io.tool_output(f"Connected to {name}.")
+            self.io.tool_output("Use /mcp save to persist this server to .mcp.json.")
+        else:
+            self.io.tool_error("MCP manager is not initialized.")
+
+    def _mcp_remove(self, arg):
+        mgr = self._mcp_manager()
+        if not mgr:
+            return
+        name = arg.strip()
+        if not name:
+            self.io.tool_error("Usage: /mcp remove <server-name>")
+            return
+        if mgr.remove_server(name):
+            self.io.tool_output(f"Removed MCP server {name}.")
+        else:
+            self.io.tool_error(f"No such MCP server: {name}")
+
+    def _mcp_save(self, arg):
+        mgr = self._mcp_manager()
+        if not mgr:
+            return
+        target = (arg.strip() or None) or (mgr.config_root or ".")
+        from aider.mcp.config import MCPServerConfig
+
+        servers = {}
+        for cfg in mgr.runtime_configs():
+            if isinstance(cfg, MCPServerConfig) and (cfg.url or cfg.command):
+                spec = {}
+                if cfg.url:
+                    spec["url"] = cfg.url
+                    if cfg.headers:
+                        spec["headers"] = cfg.headers
+                else:
+                    spec["command"] = cfg.command
+                    spec["args"] = cfg.args
+                    if cfg.env:
+                        spec["env"] = cfg.env
+                servers[cfg.name] = spec
+        import json
+        import os
+
+        path = os.path.join(target, ".mcp.json")
+        data = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                data = {}
+        data.setdefault("mcpServers", {}).update(servers)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            self.io.tool_output(f"Saved MCP servers to {path}")
+        except OSError as e:
+            self.io.tool_error(f"Failed to save: {e}")
+
+    def _mcp_reload(self):
+        mgr = self._mcp_manager()
+        if not mgr:
+            return
+        mgr.shutdown()
+        mgr.load_args(
+            getattr(self.args, "mcp_server", None),
+            getattr(self.args, "mcp_header", None),
+            mgr.config_root,
+        )
+        mgr.start()
+        self._mcp_status()
+
+    def _mcp_history(self):
+        all_messages = self.coder.done_messages + self.coder.cur_messages
+        tool_msgs = [m for m in all_messages if "[MCP tool" in str(m.get("content", ""))]
+        if not tool_msgs:
+            self.io.tool_output("No MCP tool results in the current session.")
+            return
+        for m in tool_msgs[-5:]:
+            content = str(m.get("content", ""))
+            self.io.tool_output(content[:500])
+
+    def completions_mcp(self):
+        mgr = getattr(self.coder, "mcp_manager", None)
+        if not mgr:
+            return ["list", "exec", "add", "save", "reload", "history", "status"]
+        subs = ["list", "exec", "add", "remove", "save", "reload", "history"]
+        try:
+            subs += [t.name for t in mgr.list_tools()]
+        except Exception:
+            pass
+        return subs
 
 
 def expand_subdir(file_path):

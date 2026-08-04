@@ -120,6 +120,8 @@ class Coder:
     chat_language = None
     commit_language = None
     file_watcher = None
+    mcp_manager = None
+    mcp_max_roundtrips = 5
 
     @classmethod
     def create(
@@ -191,6 +193,13 @@ class Coder:
             if hasattr(coder, "edit_format") and coder.edit_format == edit_format:
                 res = coder(main_model, io, **kwargs)
                 res.original_kwargs = dict(kwargs)
+                if from_coder and hasattr(from_coder, "mcp_manager"):
+                    res.mcp_manager = from_coder.mcp_manager
+                    res.mcp_max_roundtrips = from_coder.mcp_max_roundtrips
+                    if res.mcp_manager:
+                        for fn in getattr(res.mcp_manager, "function_definitions", lambda: [])():
+                            if fn not in res.functions:
+                                res.functions.append(fn)
                 return res
 
         valid_formats = [
@@ -1453,11 +1462,46 @@ class Coder:
         self.usage_report = None
         exhausted = False
         interrupted = False
+        mcp_roundtrips = 0
         try:
             while True:
                 try:
                     yield from self.send(messages, functions=self.functions)
-                    break
+
+                    mcp_tool_name = self._pending_mcp_tool_call()
+                    if not mcp_tool_name:
+                        break
+
+                    if mcp_roundtrips >= self.mcp_max_roundtrips:
+                        self.io.tool_warning(
+                            f"Stopping after {mcp_roundtrips} MCP tool-call roundtrips."
+                        )
+                        self.partial_response_content = "MCP tool-call limit reached."
+                        self.partial_response_function_call = dict()
+                        break
+
+                    args = self.parse_partial_args() or {}
+                    result = self.mcp_manager.dispatch(mcp_tool_name, args)
+                    tool_text = result["text"]
+                    if result["is_error"]:
+                        tool_text = "Tool execution error:\n" + tool_text
+
+                    assistant_msg = dict(
+                        role="assistant",
+                        content=None,
+                        function_call=dict(
+                            name=mcp_tool_name, arguments=json.dumps(args)
+                        ),
+                    )
+                    tool_msg = dict(
+                        role="user",
+                        content=f"[MCP tool '{mcp_tool_name}' result]\n{tool_text}",
+                    )
+                    self.cur_messages.append(assistant_msg)
+                    self.cur_messages.append(tool_msg)
+                    messages.append(assistant_msg)
+                    messages.append(tool_msg)
+                    mcp_roundtrips += 1
                 except litellm_ex.exceptions_tuple() as err:
                     ex_info = litellm_ex.get_ex_info(err)
 
@@ -1698,6 +1742,14 @@ class Coder:
     def __del__(self):
         """Cleanup when the Coder object is destroyed."""
         self.ok_to_warm_cache = False
+
+    def _pending_mcp_tool_call(self):
+        if not self.mcp_manager or not self.partial_response_function_call:
+            return None
+        name = self.partial_response_function_call.get("name", "")
+        if name and self.mcp_manager.is_mcp_tool(name):
+            return name
+        return None
 
     def add_assistant_reply_to_cur_messages(self):
         if self.partial_response_content:
