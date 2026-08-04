@@ -73,7 +73,7 @@ def _server_from_json(name: str, data: dict, source: str) -> MCPServerConfig:
     command = data.get("command")
     headers = data.get("headers") or {}
 
-    if url and not (t and t == "stdio"):
+    if url and t != "stdio":
         return MCPServerConfig(
             name=name,
             url=str(url),

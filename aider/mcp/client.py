@@ -120,17 +120,12 @@ class MCPClient:
 
             if self.headers:
                 self._http_client = httpx.AsyncClient(headers=self.headers)
-                async with streamable_http_client(
-                    self.url, http_client=self._http_client
-                ) as (read, write, _get_sid):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        await self._publish_session(session)
-            else:
-                async with streamable_http_client(self.url) as (read, write, _get_sid):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        await self._publish_session(session)
+            async with streamable_http_client(
+                self.url, http_client=self._http_client
+            ) as (read, write, _get_sid):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await self._publish_session(session)
         elif self.command:
             import mcp
 

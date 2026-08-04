@@ -12,7 +12,7 @@ from typing import Any, Optional
 from mcp.types import Tool
 
 from .client import MCPClient
-from .config import MCPServerConfig
+from .config import MCPServerConfig, load_from_args
 
 
 class MCPManager:
@@ -30,8 +30,7 @@ class MCPManager:
 
         self._configs: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, MCPClient] = {}
-        self._owners: dict[str, str] = {}  # tool name -> server name
-        self._tool_to_server: dict[str, str] = {}
+        self._tool_to_server: dict[str, str] = {}  # tool name -> server name
         self._errors: dict[str, str] = {}  # server name -> error message
         self._runtime: dict[str, MCPServerConfig] = {}
         self._started = False
@@ -48,14 +47,9 @@ class MCPManager:
         mcp_headers: Optional[list[str]],
         root,
     ) -> None:
-        from . import config as mcp_config
-
         self.config_root = root
-        for name, server in mcp_config.load_from_args(mcp_servers, mcp_headers, root).items():
+        for name, server in load_from_args(mcp_servers, mcp_headers, root).items():
             self.add_config(server)
-
-    def configs(self) -> list[MCPServerConfig]:
-        return list(self._configs.values())
 
     def runtime_configs(self) -> list[MCPServerConfig]:
         return list(self._runtime.values()) + [
@@ -70,7 +64,7 @@ class MCPManager:
         for name, cfg in dict(self._configs).items():
             self._connect(cfg)
 
-    def _connect(self, cfg: MCPServerConfig, runtime: bool = False) -> bool:
+    def _connect(self, cfg: MCPServerConfig) -> bool:
         try:
             client = MCPClient(
                 name=cfg.name,
@@ -90,14 +84,11 @@ class MCPManager:
 
         self._clients[cfg.name] = client
         self._errors.pop(cfg.name, None)
-        if runtime:
-            self._configs.setdefault(cfg.name, cfg)
 
         # register tools
         try:
             for tool in client.list_tools():
                 self._tool_to_server[tool.name] = cfg.name
-                self._owners.setdefault(tool.name, cfg.name)
         except Exception as err:
             self._errors[cfg.name] = str(err)
             if self.io:
@@ -114,7 +105,6 @@ class MCPManager:
                 pass
         self._clients.clear()
         self._tool_to_server.clear()
-        self._owners.clear()
         self._started = False
 
     # -- status ------------------------------------------------------------
@@ -205,15 +195,10 @@ class MCPManager:
             text = f"(tool '{getattr(result, 'name', '')}' returned no text output)"
         return text[: self.output_limit]
 
-    def truncate(self, text: str) -> str:
-        if len(text) > self.output_limit:
-            return text[: self.output_limit] + "\n...(truncated)"
-        return text
-
     # -- runtime mutations (TUI) -------------------------------------------
 
     def add_server(self, cfg: MCPServerConfig) -> bool:
-        ok = self._connect(cfg, runtime=True)
+        ok = self._connect(cfg)
         if ok:
             self._runtime[cfg.name] = cfg
             self._configs.setdefault(cfg.name, cfg)

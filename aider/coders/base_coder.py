@@ -197,7 +197,9 @@ class Coder:
                     res.mcp_manager = from_coder.mcp_manager
                     res.mcp_max_roundtrips = from_coder.mcp_max_roundtrips
                     if res.mcp_manager:
-                        for fn in getattr(res.mcp_manager, "function_definitions", lambda: [])():
+                        if res.functions is None:
+                            res.functions = []
+                        for fn in res.mcp_manager.function_definitions():
                             if fn not in res.functions:
                                 res.functions.append(fn)
                 return res

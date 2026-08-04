@@ -239,6 +239,31 @@ class TestMCPCommands:
         coder.functions = list(mgr.function_definitions())
         return Commands(io, coder), coder, mgr
 
+    def test_subcoder_with_nonfunc_edit_format(self, http_server, tmp_path, monkeypatch):
+        from aider.coders import Coder
+        from aider.io import InputOutput
+        from aider.models import Model
+
+        monkeypatch.chdir(tmp_path)
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        coder = Coder.create(Model("gpt-3.5-turbo"), None, io)
+
+        mgr = MCPManager(io=io)
+        mgr.add_config(MCPServerConfig(name="mock", url=http_server))
+        mgr.start()
+        coder.mcp_manager = mgr
+        coder.functions = list(mgr.function_definitions())
+
+        try:
+            sub = Coder.create(
+                coder.main_model, edit_format="whole", io=io, from_coder=coder
+            )
+            assert sub.mcp_manager is mgr
+            names = {f["name"] for f in sub.functions or []}
+            assert "echo_tool" in names
+        finally:
+            coder.mcp_manager.shutdown()
+
     def test_mcp_status(self, http_server, tmp_path, monkeypatch):
         commands, coder, _ = self.make_commands(http_server, tmp_path, monkeypatch)
         with mock.patch.object(commands.io, "tool_output") as out:
