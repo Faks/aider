@@ -104,6 +104,8 @@ def load_mcp_json(root: Optional[Path]) -> dict[str, MCPServerConfig]:
         for name, spec in mcp_servers.items():
             if not isinstance(spec, dict):
                 continue
+            if spec.get("enabled") is False:
+                continue
             server = _server_from_json(name, spec, str(path))
             servers[name] = server
     return servers

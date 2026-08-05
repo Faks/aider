@@ -95,6 +95,21 @@ class TestConfig:
         assert servers["s1"].args == ["-y", "foo"]
         assert servers["s1"].env == {"A": "b"}
 
+    def test_mcp_json_remote_type_and_enabled(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "on": {"type": "remote", "url": "http://x/mcp", "enabled": True},
+                        "off": {"type": "remote", "url": "http://y/mcp", "enabled": False},
+                    }
+                }
+            )
+        )
+        servers = load_mcp_json(tmp_path)
+        assert servers["on"].url == "http://x/mcp"
+        assert "off" not in servers
+
     def test_precedence_cli_over_json(self, tmp_path):
         (tmp_path / ".mcp.json").write_text(
             json.dumps({"mcpServers": {"s1": {"url": "http://json"}}})
