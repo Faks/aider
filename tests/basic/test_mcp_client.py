@@ -230,6 +230,8 @@ class TestMainWiring:
             names = {f["name"] for f in mgr.function_definitions()}
             assert "echo_tool" in names
             assert any(f.get("name") == "echo_tool" for f in coder.functions)
+            assert coder.mcp_max_roundtrips == 0
+            assert mgr.max_roundtrips == 0
         finally:
             coder.mcp_manager.shutdown()
 

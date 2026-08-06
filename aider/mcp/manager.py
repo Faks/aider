@@ -20,7 +20,7 @@ class MCPManager:
         self,
         io=None,
         output_limit: int = 16000,
-        max_roundtrips: int = 5,
+        max_roundtrips: int = 0,
         timeout: float = 60,
     ):
         self.io = io

@@ -901,8 +901,8 @@ def get_parser(default_config_files, git_root):
     group.add_argument(
         "--mcp-max-roundtrips",
         metavar="N",
-        default=5,
-        help="Maximum MCP tool call roundtrips per user message (default: 5)",
+        default=0,
+        help="Maximum MCP tool call roundtrips per user message (default: 0 = unlimited)",
     )
     group.add_argument(
         "--mcp-frame",

@@ -122,7 +122,7 @@ class Coder:
     commit_language = None
     file_watcher = None
     mcp_manager = None
-    mcp_max_roundtrips = 5
+    mcp_max_roundtrips = 0  # 0 = unlimited
 
     @classmethod
     def create(
@@ -1475,7 +1475,7 @@ class Coder:
                     if not mcp_tool_name:
                         break
 
-                    if mcp_roundtrips >= self.mcp_max_roundtrips:
+                    if self.mcp_max_roundtrips > 0 and mcp_roundtrips >= self.mcp_max_roundtrips:
                         self.io.tool_warning(
                             f"Stopping after {mcp_roundtrips} MCP tool-call roundtrips."
                         )
