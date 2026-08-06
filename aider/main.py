@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import re
@@ -1040,8 +1041,13 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         for fn in mcp_manager.function_definitions():
             if fn not in coder.functions:
                 coder.functions.append(fn)
-    import atexit
+    # Shut MCP clients down before interpreter exit. Registering via
+    # threading._register_atexit (not atexit) ensures the cleanup runs before
+    # concurrent.futures._python_exit flags all ThreadPoolExecutors as shut
+    # down; the MCP session's terminate-session DELETE needs a live executor.
+    import threading
 
+    threading._register_atexit(mcp_manager.shutdown)
     atexit.register(mcp_manager.shutdown)
     for name, status in mcp_manager.server_status().items():
         io.tool_output(f"MCP server {name}: {status}")

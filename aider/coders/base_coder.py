@@ -109,6 +109,7 @@ class Coder:
     test_outcome = None
     multi_response_content = ""
     partial_response_content = ""
+    partial_response_tool_call_id = None
     commit_before_message = []
     message_cost = 0.0
     add_cache_headers = False
@@ -1488,15 +1489,26 @@ class Coder:
                     if result["is_error"]:
                         tool_text = "Tool execution error:\n" + tool_text
 
+                    tool_call_id = (
+                        self.partial_response_tool_call_id
+                        or f"call_mcp_{mcp_tool_name}"
+                    )
                     assistant_msg = dict(
                         role="assistant",
                         content=None,
-                        function_call=dict(
-                            name=mcp_tool_name, arguments=json.dumps(args)
-                        ),
+                        tool_calls=[
+                            dict(
+                                id=tool_call_id,
+                                type="function",
+                                function=dict(
+                                    name=mcp_tool_name, arguments=json.dumps(args)
+                                ),
+                            )
+                        ],
                     )
                     tool_msg = dict(
-                        role="user",
+                        role="tool",
+                        tool_call_id=tool_call_id,
                         content=f"[MCP tool '{mcp_tool_name}' result]\n{tool_text}",
                     )
                     self.cur_messages.append(assistant_msg)
@@ -1757,6 +1769,11 @@ class Coder:
         if self.partial_response_content:
             self.cur_messages += [dict(role="assistant", content=self.partial_response_content)]
         if self.partial_response_function_call:
+            name = self.partial_response_function_call.get("name", "")
+            if self.mcp_manager and self.mcp_manager.is_mcp_tool(name):
+                # MCP tool calls are recorded by the auto-dispatch loop in the
+                # modern tool_calls format; don't duplicate as legacy function_call.
+                return
             self.cur_messages += [
                 dict(
                     role="assistant",
@@ -1843,6 +1860,7 @@ class Coder:
 
         self.partial_response_content = ""
         self.partial_response_function_call = dict()
+        self.partial_response_tool_call_id = None
 
         self.io.log_llm_history("TO LLM", format_messages(messages))
 
@@ -1905,6 +1923,9 @@ class Coder:
                 self.partial_response_function_call = (
                     completion.choices[0].message.tool_calls[0].function
                 )
+                self.partial_response_tool_call_id = getattr(
+                    completion.choices[0].message.tool_calls[0], "id", None
+                )
         except AttributeError as func_err:
             show_func_err = func_err
 
@@ -1965,16 +1986,41 @@ class Coder:
                 raise FinishReasonLength()
 
             try:
-                func = chunk.choices[0].delta.function_call
-                # dump(func)
-                for k, v in func.items():
-                    if k in self.partial_response_function_call:
-                        self.partial_response_function_call[k] += v
-                    else:
-                        self.partial_response_function_call[k] = v
-                received_content = True
+                delta = chunk.choices[0].delta
             except AttributeError:
-                pass
+                delta = None
+
+            if delta is not None:
+                # Legacy `function_call` streaming field
+                func = getattr(delta, "function_call", None)
+                if func:
+                    for k, v in func.items():
+                        if k in self.partial_response_function_call:
+                            self.partial_response_function_call[k] += v
+                        else:
+                            self.partial_response_function_call[k] = v
+                    received_content = True
+
+                # Modern `tool_calls` streaming field (list of dicts)
+                tool_calls = getattr(delta, "tool_calls", None)
+                if tool_calls:
+                    for tc in tool_calls:
+                        tc_id = getattr(tc, "id", None)
+                        if tc_id:
+                            self.partial_response_tool_call_id = tc_id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            name = getattr(fn, "name", None)
+                            if name:
+                                self.partial_response_function_call["name"] = (
+                                    self.partial_response_function_call.get("name") or ""
+                                ) + name
+                            arguments = getattr(fn, "arguments", None)
+                            if arguments:
+                                self.partial_response_function_call["arguments"] = (
+                                    self.partial_response_function_call.get("arguments") or ""
+                                ) + arguments
+                    received_content = True
 
             text = ""
 

@@ -330,3 +330,144 @@ class TestMCPCommands:
         with mock.patch.object(commands.io, "tool_error") as err:
             commands.cmd_mcp("list")
         assert any("No MCP servers configured" in str(a[0]) for a in err.call_args_list)
+
+
+class TestMCPAutoDispatch:
+    """Regression tests for the auto-dispatch loop and tool_calls round-trip.
+
+    The model must be able to emit modern ``tool_calls`` (not legacy
+    ``function_call``) and receive results back as ``role="tool"`` messages
+    with a matching ``tool_call_id`` - that's what the local llama.cpp router
+    expects. These tests use only the mock server (never a real MCP endpoint).
+    """
+
+    def make_coder(self, http_server, tmp_path, monkeypatch, stream=False):
+        from aider.coders import Coder
+        from aider.io import InputOutput
+        from aider.models import Model
+
+        monkeypatch.chdir(tmp_path)
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        coder = Coder.create(Model("gpt-3.5-turbo"), None, io, stream=stream)
+
+        mgr = MCPManager(io=io)
+        mgr.add_config(MCPServerConfig(name="mock", url=http_server))
+        mgr.start()
+        coder.mcp_manager = mgr
+        coder.functions = list(mgr.function_definitions())
+        return coder, mgr
+
+    def test_streaming_tool_calls_accumulate(self, tmp_path, monkeypatch):
+        """Modern ``delta.tool_calls`` chunks must accumulate name/arguments/id."""
+        from types import SimpleNamespace
+
+        from aider.coders import Coder
+        from aider.io import InputOutput
+        from aider.models import Model
+
+        monkeypatch.chdir(tmp_path)
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        model = Model("gpt-3.5-turbo")
+        coder = Coder.create(model, None, io=io, stream=True)
+
+        def make_chunk(tool_calls):
+            chunk = mock.MagicMock()
+            chunk.choices = [mock.MagicMock()]
+            chunk.choices[0].finish_reason = None
+            chunk.choices[0].delta = mock.MagicMock()
+            chunk.choices[0].delta.content = None
+            chunk.choices[0].delta.reasoning_content = None
+            chunk.choices[0].delta.reasoning = None
+            chunk.choices[0].delta.tool_calls = tool_calls
+            return chunk
+
+        chunks = [
+            make_chunk(
+                [
+                    SimpleNamespace(
+                        id="call_abc123",
+                        function=SimpleNamespace(
+                            name="echo_tool", arguments='{"te'
+                        ),
+                    )
+                ]
+            ),
+            make_chunk(
+                [
+                    SimpleNamespace(
+                        id=None,
+                        function=SimpleNamespace(name=None, arguments='xt": "hi"}'),
+                    )
+                ]
+            ),
+        ]
+
+        mock_hash = mock.MagicMock()
+        mock_hash.hexdigest.return_value = "mock_hash_digest"
+        with mock.patch.object(
+            model, "send_completion", return_value=(mock_hash, chunks)
+        ):
+            messages = [{"role": "user", "content": "hello"}]
+            list(coder.send(messages))
+
+        assert coder.partial_response_function_call == {
+            "name": "echo_tool",
+            "arguments": '{"text": "hi"}',
+        }
+        assert coder.partial_response_tool_call_id == "call_abc123"
+
+    def test_auto_dispatch_emits_modern_tool_calls(self, http_server, tmp_path, monkeypatch):
+        """The dispatch loop must round-trip as modern tool_calls + role=tool."""
+        coder, mgr = self.make_coder(http_server, tmp_path, monkeypatch, stream=False)
+
+        calls = []
+
+        def fake_send(messages, model=None, functions=None):
+            calls.append(messages)
+            if len(calls) == 1:
+                coder.partial_response_function_call = {
+                    "name": "echo_tool",
+                    "arguments": '{"text": "hi"}',
+                }
+                coder.partial_response_tool_call_id = "call_abc123"
+            else:
+                coder.partial_response_function_call = dict()
+                coder.partial_response_tool_call_id = None
+                coder.partial_response_content = "I echoed it."
+            yield None
+
+        try:
+            with mock.patch.object(coder, "send", fake_send):
+                coder.run_one("hello", preproc=False)
+
+            assert len(calls) == 2, "second send() is the post-tool round trip"
+
+            roles = [m["role"] for m in coder.cur_messages]
+            assert roles.count("tool") == 1
+            assert roles.count("assistant") == 2  # tool_calls msg + final content msg
+
+            assistant_msg = next(
+                m for m in coder.cur_messages if m.get("tool_calls")
+            )
+            assert assistant_msg["content"] is None
+            assert assistant_msg["tool_calls"] == [
+                {
+                    "id": "call_abc123",
+                    "type": "function",
+                    "function": {
+                        "name": "echo_tool",
+                        "arguments": '{"text": "hi"}',
+                    },
+                }
+            ]
+            # No legacy function_call assistant message for MCP tools
+            assert not any(
+                m.get("role") == "assistant" and "function_call" in m
+                for m in coder.cur_messages
+            )
+
+            tool_msg = next(m for m in coder.cur_messages if m["role"] == "tool")
+            assert tool_msg["tool_call_id"] == "call_abc123"
+            assert tool_msg["content"].startswith("[MCP tool 'echo_tool' result]")
+        finally:
+            mgr.shutdown()
