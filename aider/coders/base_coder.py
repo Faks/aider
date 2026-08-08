@@ -109,6 +109,7 @@ class Coder:
     test_outcome = None
     multi_response_content = ""
     partial_response_content = ""
+    partial_response_tool_call_id = None
     commit_before_message = []
     message_cost = 0.0
     add_cache_headers = False
@@ -120,6 +121,8 @@ class Coder:
     chat_language = None
     commit_language = None
     file_watcher = None
+    mcp_manager = None
+    mcp_max_roundtrips = 0  # 0 = unlimited
 
     @classmethod
     def create(
@@ -191,6 +194,15 @@ class Coder:
             if hasattr(coder, "edit_format") and coder.edit_format == edit_format:
                 res = coder(main_model, io, **kwargs)
                 res.original_kwargs = dict(kwargs)
+                if from_coder and hasattr(from_coder, "mcp_manager"):
+                    res.mcp_manager = from_coder.mcp_manager
+                    res.mcp_max_roundtrips = from_coder.mcp_max_roundtrips
+                    if res.mcp_manager:
+                        if res.functions is None:
+                            res.functions = []
+                        for fn in res.mcp_manager.function_definitions():
+                            if fn not in res.functions:
+                                res.functions.append(fn)
                 return res
 
         valid_formats = [
@@ -1453,11 +1465,57 @@ class Coder:
         self.usage_report = None
         exhausted = False
         interrupted = False
+        mcp_roundtrips = 0
         try:
             while True:
                 try:
                     yield from self.send(messages, functions=self.functions)
-                    break
+
+                    mcp_tool_name = self._pending_mcp_tool_call()
+                    if not mcp_tool_name:
+                        break
+
+                    if self.mcp_max_roundtrips > 0 and mcp_roundtrips >= self.mcp_max_roundtrips:
+                        self.io.tool_warning(
+                            f"Stopping after {mcp_roundtrips} MCP tool-call roundtrips."
+                        )
+                        self.partial_response_content = "MCP tool-call limit reached."
+                        self.partial_response_function_call = dict()
+                        break
+
+                    args = self.parse_partial_args() or {}
+                    result = self.mcp_manager.dispatch(mcp_tool_name, args)
+                    tool_text = result["text"]
+                    if result["is_error"]:
+                        tool_text = "Tool execution error:\n" + tool_text
+
+                    tool_call_id = (
+                        self.partial_response_tool_call_id
+                        or f"call_mcp_{mcp_tool_name}"
+                    )
+                    assistant_msg = dict(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[
+                            dict(
+                                id=tool_call_id,
+                                type="function",
+                                function=dict(
+                                    name=mcp_tool_name, arguments=json.dumps(args)
+                                ),
+                            )
+                        ],
+                    )
+                    tool_msg = dict(
+                        role="tool",
+                        tool_call_id=tool_call_id,
+                        content=f"[MCP tool '{mcp_tool_name}' result]\n{tool_text}",
+                    )
+                    self.cur_messages.append(assistant_msg)
+                    self.cur_messages.append(tool_msg)
+                    messages.append(assistant_msg)
+                    messages.append(tool_msg)
+                    mcp_roundtrips += 1
                 except litellm_ex.exceptions_tuple() as err:
                     ex_info = litellm_ex.get_ex_info(err)
 
@@ -1699,10 +1757,23 @@ class Coder:
         """Cleanup when the Coder object is destroyed."""
         self.ok_to_warm_cache = False
 
+    def _pending_mcp_tool_call(self):
+        if not self.mcp_manager or not self.partial_response_function_call:
+            return None
+        name = self.partial_response_function_call.get("name", "")
+        if name and self.mcp_manager.is_mcp_tool(name):
+            return name
+        return None
+
     def add_assistant_reply_to_cur_messages(self):
         if self.partial_response_content:
             self.cur_messages += [dict(role="assistant", content=self.partial_response_content)]
         if self.partial_response_function_call:
+            name = self.partial_response_function_call.get("name", "")
+            if self.mcp_manager and self.mcp_manager.is_mcp_tool(name):
+                # MCP tool calls are recorded by the auto-dispatch loop in the
+                # modern tool_calls format; don't duplicate as legacy function_call.
+                return
             self.cur_messages += [
                 dict(
                     role="assistant",
@@ -1789,6 +1860,7 @@ class Coder:
 
         self.partial_response_content = ""
         self.partial_response_function_call = dict()
+        self.partial_response_tool_call_id = None
 
         self.io.log_llm_history("TO LLM", format_messages(messages))
 
@@ -1851,6 +1923,9 @@ class Coder:
                 self.partial_response_function_call = (
                     completion.choices[0].message.tool_calls[0].function
                 )
+                self.partial_response_tool_call_id = getattr(
+                    completion.choices[0].message.tool_calls[0], "id", None
+                )
         except AttributeError as func_err:
             show_func_err = func_err
 
@@ -1911,16 +1986,41 @@ class Coder:
                 raise FinishReasonLength()
 
             try:
-                func = chunk.choices[0].delta.function_call
-                # dump(func)
-                for k, v in func.items():
-                    if k in self.partial_response_function_call:
-                        self.partial_response_function_call[k] += v
-                    else:
-                        self.partial_response_function_call[k] = v
-                received_content = True
+                delta = chunk.choices[0].delta
             except AttributeError:
-                pass
+                delta = None
+
+            if delta is not None:
+                # Legacy `function_call` streaming field
+                func = getattr(delta, "function_call", None)
+                if func:
+                    for k, v in func.items():
+                        if k in self.partial_response_function_call:
+                            self.partial_response_function_call[k] += v
+                        else:
+                            self.partial_response_function_call[k] = v
+                    received_content = True
+
+                # Modern `tool_calls` streaming field (list of dicts)
+                tool_calls = getattr(delta, "tool_calls", None)
+                if tool_calls:
+                    for tc in tool_calls:
+                        tc_id = getattr(tc, "id", None)
+                        if tc_id:
+                            self.partial_response_tool_call_id = tc_id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            name = getattr(fn, "name", None)
+                            if name:
+                                self.partial_response_function_call["name"] = (
+                                    self.partial_response_function_call.get("name") or ""
+                                ) + name
+                            arguments = getattr(fn, "arguments", None)
+                            if arguments:
+                                self.partial_response_function_call["arguments"] = (
+                                    self.partial_response_function_call.get("arguments") or ""
+                                ) + arguments
+                    received_content = True
 
             text = ""
 

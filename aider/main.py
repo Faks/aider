@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import re
@@ -1014,6 +1015,42 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         io.tool_error(str(err))
         analytics.event("exit", reason="ValueError during coder creation")
         return 1
+
+    # MCP setup: connect MCP servers configured via CLI, .aider.conf.yml,
+    # .mcp.json or AIDER_MCP_SERVER and expose their tools to the model.
+    from aider.mcp.manager import MCPManager
+
+    mcp_manager = MCPManager(
+        io=io,
+        output_limit=args.mcp_tool_output_limit,
+        max_roundtrips=args.mcp_max_roundtrips,
+        timeout=args.mcp_frame,
+    )
+    mcp_root = (
+        Path(args.mcp_root)
+        if args.mcp_root
+        else (Path(git_root) if git_root else Path.cwd())
+    )
+    mcp_manager.load_args(args.mcp_server, args.mcp_header, mcp_root)
+    if mcp_manager.servers:
+        mcp_manager.start()
+        coder.mcp_manager = mcp_manager
+        coder.mcp_max_roundtrips = args.mcp_max_roundtrips
+        if coder.functions is None:
+            coder.functions = []
+        for fn in mcp_manager.function_definitions():
+            if fn not in coder.functions:
+                coder.functions.append(fn)
+    # Shut MCP clients down before interpreter exit. Registering via
+    # threading._register_atexit (not atexit) ensures the cleanup runs before
+    # concurrent.futures._python_exit flags all ThreadPoolExecutors as shut
+    # down; the MCP session's terminate-session DELETE needs a live executor.
+    import threading
+
+    threading._register_atexit(mcp_manager.shutdown)
+    atexit.register(mcp_manager.shutdown)
+    for name, status in mcp_manager.server_status().items():
+        io.tool_output(f"MCP server {name}: {status}")
 
     if return_coder:
         analytics.event("exit", reason="Returning coder object")

@@ -1004,9 +1004,12 @@ class Model(ModelSettings):
             kwargs["temperature"] = temperature
 
         if functions is not None:
-            function = functions[0]
-            kwargs["tools"] = [dict(type="function", function=function)]
-            kwargs["tool_choice"] = {"type": "function", "function": {"name": function["name"]}}
+            kwargs["tools"] = [dict(type="function", function=f) for f in functions]
+            kwargs["tool_choice"] = (
+                {"type": "function", "function": {"name": functions[0]["name"]}}
+                if len(functions) == 1
+                else "auto"
+            )
         if self.extra_params:
             kwargs.update(self.extra_params)
         if self.is_ollama() and "num_ctx" not in kwargs:

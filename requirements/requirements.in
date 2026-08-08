@@ -48,3 +48,6 @@ importlib-metadata<8.0.0
 # mcp which is a pywin32 dependency that fails on linux CI.
 fastapi
 orjson
+
+# Model Context Protocol client for the /mcp command and MCP tool support.
+mcp
