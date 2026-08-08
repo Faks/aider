@@ -892,6 +892,7 @@ def get_parser(default_config_files, git_root):
     group.add_argument(
         "--mcp-tool-output-limit",
         metavar="CHARS",
+        type=int,
         default=16000,
         help=(
             "Maximum number of characters of MCP tool output to send back into the chat"
@@ -901,12 +902,14 @@ def get_parser(default_config_files, git_root):
     group.add_argument(
         "--mcp-max-roundtrips",
         metavar="N",
+        type=int,
         default=0,
         help="Maximum MCP tool call roundtrips per user message (default: 0 = unlimited)",
     )
     group.add_argument(
         "--mcp-frame",
         metavar="SECONDS",
+        type=int,
         default=60,
         help="Seconds to wait for an MCP server response before timing out (default: 60)",
     )
